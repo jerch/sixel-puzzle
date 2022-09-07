@@ -1,0 +1,431 @@
+#!/usr/bin/env python3
+import sys
+from typing import List, Optional, Tuple, Union
+from PIL.Image import Image, open as openImage, new as newImage
+from subprocess import Popen, PIPE
+from math import floor
+from random import sample, randrange
+from termlib import TerminalContext, cterminal_context
+
+
+DEFAULT_FG = '#fff'
+DEFAULT_BG = '#000'
+
+
+# [0] - original image, [1] - current tiled version
+FITTED: List[Union[Image, None]] = [None, None]
+# image tiles with grey border
+TILED: List[Image] = []
+# image tiles with white border for active tiles
+ACTIVE: List[Image] = []
+
+
+def fit_screen(filename: str, size: Tuple[int, int]) -> None:
+    with openImage(filename) as im:
+        FITTED[0] = im.resize(size)
+
+def tile_image(im: Image, size: Tuple[int, int], active_color: str = '#fff', inactive_color: str = '#808080') -> None:
+    TILED.clear()
+    x = im.size[0]
+    y = im.size[1]
+    x_excess = int(x / size[0])
+    y_excess = int(y / size[1])
+    for r in range(size[1]):
+        for c in range(size[0]):
+            tile = newImage('RGB', (x_excess, y_excess), inactive_color)
+            tile.paste(im.crop((x_excess * c + 1, y_excess * r + 1, x_excess * (c + 1) - 1, y_excess * (r + 1) - 1)), (1, 1))
+            TILED.append(tile)
+            active = newImage('RGB', (x_excess, y_excess), active_color)
+            active.paste(im.crop((x_excess * c + 1, y_excess * r + 1, x_excess * (c + 1) - 1, y_excess * (r + 1) - 1)), (1, 1))
+            ACTIVE.append(active)
+
+def image_from_tiles(src: List[Image], im_size: Tuple[int, int], size: Tuple[int, int], bg_color: str = '#000') -> None:
+    im = newImage('RGB', im_size, bg_color)
+    x = im_size[0]
+    y = im_size[1]
+    x_excess = int(x / size[0])
+    y_excess = int(y / size[1])
+    for r in range(size[1]):
+        for c in range(size[0]):
+            tile = src[r * size[1] + c]
+            if tile:
+                im.paste(tile, (x_excess * c, y_excess * r))
+    FITTED[1] = im
+
+def shuffle(src: List[Image], level: int) -> List[Image]:
+    length = len(src)
+    shuffled = sample(list(range(length)), length)
+    zeroed_idx = randrange(len(src))
+    zeroed = shuffled[zeroed_idx]
+    while not solvable(level, shuffled, zeroed, zeroed_idx):
+        shuffled = sample(list(range(length)), length)
+        zeroed_idx = randrange(len(src))
+        zeroed = shuffled[zeroed_idx]
+    result = [src[i] for i in shuffled]
+    result[zeroed_idx] = None
+    return result
+
+def solvable(level: int, tiles: List[int], zeroed: int, zeroed_idx: int) -> bool:
+    inversions = 0
+    if level == 2:
+        solves = {
+            (0, 1, 2, 3): [1,1,1,1],
+            (0, 1, 3, 2): [0,0,1,1],
+            (0, 2, 1, 3): [0,0,0,0],
+            (0, 2, 3, 1): [1,1,0,0],
+            (0, 3, 1, 2): [1,0,1,0],
+            (0, 3, 2, 1): [0,1,0,1],
+            (1, 0, 2, 3): [1,1,0,0],
+            (1, 0, 3, 2): [0,0,0,0],
+            (1, 2, 0, 3): [0,1,0,1],
+            (1, 2, 3, 0): [1,0,1,0],
+            (1, 3, 0, 2): [1,1,1,1],
+            (1, 3, 2, 0): [0,0,1,1],
+            (2, 0, 1, 3): [0,0,1,1],
+            (2, 0, 3, 1): [1,1,1,1],
+            (2, 1, 0, 3): [1,0,1,0],
+            (2, 1, 3, 0): [0,1,0,1],
+            (2, 3, 0, 1): [0,0,0,0],
+            (2, 3, 1, 0): [1,1,0,0],
+            (3, 0, 1, 2): [0,1,0,1],
+            (3, 0, 2, 1): [1,0,1,0],
+            (3, 1, 0, 2): [1,1,0,0],
+            (3, 1, 2, 0): [0,0,0,0],
+            (3, 2, 0, 1): [0,0,1,1],
+            (3, 2, 1, 0): [1,1,1,1]
+        }
+        return bool(solves[tuple(tiles)][zeroed_idx])
+    elif level % 2:
+        l = level * level
+        for i in range(l):
+            for j in range(i+1, l):
+                if tiles[i] != zeroed and tiles[j] != zeroed and tiles[i] > tiles[j]:
+                    inversions += 1
+        return inversions % 2 == 0
+    else:
+        # TODO: higher even squares
+        # https://en.wikipedia.org/wiki/15_puzzle
+        # https://math.stackexchange.com/questions/754827/does-a-15-puzzle-always-have-a-solution
+        raise NotImplementedError
+
+def correct_order(shuffled: List[Image]) -> bool:
+    for i, tile in enumerate(shuffled):
+        if (tile != TILED[i] and tile != ACTIVE[i]) and shuffled[i] != None:
+            return False
+    return True
+
+def activate(src: List[Image], pos: Tuple[int, int], size: Tuple[int, int]) -> None:
+    tile = src[pos[1] * size[1] + pos[0]]
+    if not tile:
+        return
+    idx = TILED.index(tile)
+    src[pos[1] * size[1] + pos[0]] = ACTIVE[idx]
+
+def deactivate(src: List[Image], pos: Tuple[int, int], size: Tuple[int, int]) -> None:
+    tile = src[pos[1] * size[1] + pos[0]]
+    if not tile:
+        return
+    idx = ACTIVE.index(tile)
+    src[pos[1] * size[1] + pos[0]] = TILED[idx]
+
+def move(src: List[Image], active: Tuple[int, int], direction: str, tile_size: Tuple[int, int]) -> bool:
+    ax, ay = active
+    active_tile = src[ay * tile_size[1] + ax]
+    if not active_tile:
+        return False
+    if direction == 'right':
+        can_move = False
+        remove_x = 0
+        for x in range(ax, tile_size[0]):
+            tile = src[ay * tile_size[1] + x]
+            if not tile:
+                can_move = True
+                remove_x = x
+                break
+        if not can_move:
+            return False
+        src.pop(ay * tile_size[1] + remove_x)
+        src.insert(ay * tile_size[1] + ax, None)
+        active[0] += 1
+        return True
+    if direction == 'left':
+        can_move = False
+        remove_x = 0
+        for x in range(0, ax):
+            tile = src[ay * tile_size[1] + x]
+            if not tile:
+                can_move = True
+                remove_x = x
+                break
+        if not can_move:
+            return False
+        src.pop(ay * tile_size[1] + remove_x)
+        src.insert(ay * tile_size[1] + ax, None)
+        active[0] -= 1
+        return True
+    if direction == 'down':
+        tsrc = transpose(src, tile_size)
+        can_move = False
+        remove_y = 0
+        for y in range(ay, tile_size[1]):
+            tile = tsrc[ax * tile_size[0] + y]
+            if not tile:
+                can_move = True
+                remove_y = y
+                break
+        if not can_move:
+            return False
+        tsrc.pop(ax * tile_size[0] + remove_y)
+        tsrc.insert(ax * tile_size[0] + ay, None)
+        tsrc_back = transpose(tsrc, tile_size)
+        src.clear()
+        for tile in tsrc_back:
+            src.append(tile)
+        active[1] += 1
+        return True
+    if direction == 'up':
+        tsrc = transpose(src, tile_size)
+        can_move = False
+        remove_y = 0
+        for y in range(0, ay):
+            tile = tsrc[ax * tile_size[0] + y]
+            if not tile:
+                can_move = True
+                remove_y = y
+                break
+        if not can_move:
+            return False
+        tsrc.pop(ax * tile_size[0] + remove_y)
+        tsrc.insert(ax * tile_size[0] + ay, None)
+        tsrc_back = transpose(tsrc, tile_size)
+        src.clear()
+        for tile in tsrc_back:
+            src.append(tile)
+        active[1] -= 1
+        return True
+    return False
+
+def transpose(src: List[Image], size: Tuple[int, int]) -> List[Image]:
+    x, y = size
+    res = []
+    for ix in range(0, x):
+        for iy in range(0, y):
+            res.append(src[iy * y + ix])
+    return res
+
+def render_image(term: TerminalContext, im: Image) -> None:
+    # TODO: investigate splitted sixel prints for better performance
+    term.write('\x1b[H')
+    # use atkison here to avoid dither artefacts in blank tile (has better local details)
+    sub = Popen(['img2sixel', '-E', 'fast', '-d', 'atkinson', '-'], stdin=PIPE)
+    im.save(sub.stdin, 'png')
+    sub.stdin.close()
+    sub.wait()
+
+def render_statusline(term: TerminalContext, move_counter: int) -> None:
+    move_string = f'{move_counter}'
+    term.write(
+        f'\x1b[999H\x1b[2Kquit: q    select: ←→↑↓    move: ⇧ + ←→↑↓ | Space    preview: p'
+        f'\x1b[999;999H\x1b[{len(move_string)-1}D{move_counter}'
+    )
+
+
+# some terminal primitives for sixel
+# TODO: Should those go into termlib?
+
+def has_sixel(term: TerminalContext) -> bool:
+    report = term.query('\x1b[c')
+    if report.startswith(b'\x1b[') and report.endswith(b'c'):
+        da1_values = [int(v) for v in report[2:-1].lstrip(b'?').split(b';')]
+        if 4 in da1_values:
+            return True
+    return False
+
+def get_sixel_colors(term: TerminalContext) -> Optional[int]:
+    report = term.query('\x1b[?1;1;S')
+    if report.startswith(b'\x1b[?') and report.endswith(b'S'):
+        values = [int(v) for v in report[3:-1].split(b';')]
+        if values[1] == 0:
+            return values[2]
+    return None
+
+def set_sixel_colors(term: TerminalContext, colors: int) -> bool:
+    report = term.query(f'\x1b[?1;3;{colors}S')
+    if report.startswith(b'\x1b[?') and report.endswith(b'S'):
+        values = [int(v) for v in report[3:-1].split(b';')]
+        if values[1] == 0:
+            return True
+    return False
+
+def get_sixel_geometry(term: TerminalContext) -> List[int]:
+    report = term.query('\x1b[?2;1;S')
+    if report.startswith(b'\x1b[?') and report.endswith(b'S'):
+        values = [int(v) for v in report[3:-1].split(b';')]
+        if values[1] == 0:
+            return values[2:]
+    return []
+
+
+def puzzle(filename: str, level: int) -> None:
+    with cterminal_context() as term:
+        # fetch terminal metrics, sixel state and fg/bg
+        term_size = term.get_size()
+        if 0 in term_size:
+            term.write('Cannot get valid terminal size parameters, aborting.\n')
+            return
+        if not has_sixel(term):
+            term.write('Seems your terminal has no sixel support, aborting.\n')
+            return
+        scolors = get_sixel_colors(term)
+        if scolors and scolors < 256:
+            if not set_sixel_colors(term, 256):
+                term.write('Cannot use 256 sixel colors, aborting.\n')
+                return
+        sgeo = get_sixel_geometry(term)
+        if not sgeo:
+            sgeo = term_size[2:]
+        fg_color = term.query_color('fg') or DEFAULT_FG
+        bg_color = term.query_color('bg') or DEFAULT_BG
+
+        # adjust image size to terminal width and height minus one row
+        x, y = sgeo
+        rows = term_size[1]
+        tile_size = (level, level)
+        size = (
+            floor(float(x) / tile_size[0]) * tile_size[0],
+            floor(float(y - (y/rows)) / tile_size[1]) * tile_size[1],
+        )
+
+        # prepare image and game state
+        fit_screen(filename, size)
+        tile_image(FITTED[0], tile_size, fg_color, bg_color)
+        shuffled_tiles = shuffle(TILED, level)
+        while (correct_order(shuffled_tiles)):
+            shuffled_tiles = shuffle(TILED, level)
+        move_counter = 0
+
+        # switch to alt buffer and hide cursor in custom_state
+        # to ensure that the state gets properly reverted on errors
+        # also activate cbreak mode (raw mode + SIGBRK)
+        with term.custom_state(undo=lambda:term.write('\x1b[2J\x1b[?1049l\x1b[?25h')), term.cbreak_mode():
+            term.write('\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l')
+
+            # initial screen state
+            active = [0, 0] if shuffled_tiles[0] is not None else [1, 0]
+            activate(shuffled_tiles, active, tile_size)
+            image_from_tiles(shuffled_tiles, size, tile_size, bg_color)
+            render_image(term, FITTED[1])
+            render_statusline(term, move_counter)
+
+            # game loop
+            while True:
+                inp = term.read()
+
+                # quit
+                if inp == b'q':
+                    break
+
+                # preview original
+                if inp == b'p':
+                    render_image(term, FITTED[0])
+                    term.write('\x1b[999H\x1b[2Kquit: q    close preview: any other key')
+                    inp = term.read()
+                    if inp == b'q':
+                        break
+                    render_image(term, FITTED[1])
+                    render_statusline(term, move_counter)
+                    continue
+
+                # tile selection to move
+                if inp in (b'\x1b[A', b'\x1b[B', b'\x1b[C', b'\x1b[D'):
+                    old = (active[0], active[1])
+                    if inp == b'\x1b[A' and active[1] > 0:
+                        deactivate(shuffled_tiles, active, tile_size)
+                        active[1] -= 1
+                        activate(shuffled_tiles, active, tile_size)
+                    elif inp == b'\x1b[B' and active[1] < tile_size[1]-1:
+                        deactivate(shuffled_tiles, active, tile_size)
+                        active[1] += 1
+                        activate(shuffled_tiles, active, tile_size)
+                    elif inp == b'\x1b[C' and active[0] < tile_size[0]-1:
+                        deactivate(shuffled_tiles, active, tile_size)
+                        active[0] += 1
+                        activate(shuffled_tiles, active, tile_size)
+                    elif inp == b'\x1b[D' and active[0] > 0:
+                        deactivate(shuffled_tiles, active, tile_size)
+                        active[0] -= 1
+                        activate(shuffled_tiles, active, tile_size)
+                    else:
+                        continue
+                    if active[0] != old[0] or active[1] != old[1]:
+                        image_from_tiles(shuffled_tiles, size, tile_size, bg_color)
+                        render_image(term, FITTED[1])
+                        render_statusline(term, move_counter)
+
+                # tile move (shift+arrow)
+                if inp in (b'\x1b[1;2A', b'\x1b[1;2B', b'\x1b[1;2C', b'\x1b[1;2D'):
+                    direction = {65: 'up', 66: 'down', 67: 'right', 68: 'left'}[inp[-1]]
+                    if move(shuffled_tiles, active, direction, tile_size):
+                        move_counter += 1
+                        image_from_tiles(shuffled_tiles, size, tile_size, bg_color)
+                        render_image(term, FITTED[1])
+                        render_statusline(term, move_counter)
+
+                # move active tile with SPACE
+                if inp == b' ':
+                    if (
+                        move(shuffled_tiles, active, 'up', tile_size) or
+                        move(shuffled_tiles, active, 'down', tile_size) or
+                        move(shuffled_tiles, active, 'left', tile_size) or
+                        move(shuffled_tiles, active, 'right', tile_size)
+                    ):
+                        move_counter += 1
+                        image_from_tiles(shuffled_tiles, size, tile_size, bg_color)
+                        render_image(term, FITTED[1])
+                        render_statusline(term, move_counter)
+
+                # eval tile state
+                if correct_order(shuffled_tiles):
+                    render_image(term, FITTED[0])
+                    term.write(f'\x1b[999H\x1b[2KPuzzle solved! (press any key to exit)')
+                    move_string = f'{move_counter}'
+                    term.write(f'\x1b[999;999H\x1b[{len(move_string)-1}D{move_counter}')
+                    term.read()
+                    break
+
+
+def help(cmd):
+    print(
+        f'usage: {cmd} [-l NUM] [IMAGE FILE]\n'
+        f'  -h, --help             Show this help message.\n'
+        f'  -l NUM, --level=NUM    Choose square level (default 3).\n'
+    )
+
+
+def main():
+    args = sys.argv[:]
+    cmd = args.pop(0)
+    level = None
+    if '-h' in args or '--help' in args:
+        return help(cmd)
+    if '-l' in args:
+        idx = args.index('-l')
+        args.pop(idx)
+        if len(args) <= idx:
+            return help(cmd)
+        level = args.pop(idx)
+    if '--level=' in [a[:8] for a in args]:
+        idx = [a[:8] for a in args].index('--level=')
+        level = args.pop(idx).split('=')[-1]
+    try:
+        if level:
+            level = int(level)
+    except:
+        return help(cmd)
+    if len(args) != 1:
+        return help(cmd)
+    puzzle(args[0], level or 3)
+
+
+if __name__ == '__main__':
+    main()
