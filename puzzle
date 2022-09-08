@@ -3,7 +3,6 @@ import sys
 from typing import List, Optional, Tuple, Union
 from PIL.Image import Image, open as openImage, new as newImage
 from subprocess import Popen, PIPE
-from math import floor
 from random import sample, randrange
 from termlib import TerminalContext, cterminal_context
 
@@ -266,34 +265,71 @@ def get_sixel_geometry(term: TerminalContext) -> List[int]:
     return []
 
 
+def retrieve_terminalsize(term: TerminalContext) -> Tuple[int, int, int, int]:
+    # for pixel size we have to work around several issues:
+    # - winops contains the more accurate values from tests, but might be disabled
+    # - ioctl does not always report pixel values at all
+    # - ioctl values are off by several pixels for some TEs (xterm)
+    winops_size = term.get_size_winops()
+    if not 0 in winops_size:
+        return winops_size
+    ioctl_size = term.get_size_ioctl()
+    if 0 in ioctl_size:
+        return ioctl_size
+    # If we made it here, we have only ioctl values for pixels.
+    # While all TEs tested report here real character screen size in pixels,
+    # xterm reports window size instead. This might be off by some padding pixels,
+    # or much worse if scrollbar is visible. We dont try too hard to get the real
+    # usable values here, instead simply subtract 4 (still wrong for visible scrollbar).
+    # We do another geo check against XTSMGRAPHICS and hopefully
+    # get the closest pixel size match in the end.
+    return ioctl_size[0], ioctl_size[1], ioctl_size[2] - 4, ioctl_size[3] - 4
+
+
 def puzzle(filename: str, level: int) -> None:
     with cterminal_context() as term:
-        # fetch terminal metrics, sixel state and fg/bg
-        term_size = term.get_size()
-        if 0 in term_size:
-            term.write('Cannot get valid terminal size parameters, aborting.\n')
-            return
+        # fetch sixel state
         if not has_sixel(term):
             term.write('Seems your terminal has no sixel support, aborting.\n')
             return
+
+        # fetch terminal size
+        term_size = retrieve_terminalsize(term)
+        if 0 in term_size:
+            term.write('Cannot get valid terminal size parameters, aborting.\n')
+            return
+
+        # post adjust xy pixels for sixel
+        x, y = 0, 0
+        sgeo = get_sixel_geometry(term)
+        if sgeo:
+            # We are either on xterm or a XTSMGRAPHICS-capable TE.
+            # Old xterm will get repaired from the -4 patch (still off with visible scrollbar),
+            # others hopefully reported via winops (otherwise show a tiny gap).
+            x = term_size[2] if term_size[2] < sgeo[0] else sgeo[0]
+            y = term_size[3] if term_size[3] < sgeo[1] else sgeo[1]
+        else:
+            # All non XTSMGRAPHICS-capable TEs report proper size from
+            # winops in the tests, so we should not see an off by 4 here.
+            x, y = term_size[2], term_size[3]
+
+        # if terminal reports palette colors test for <256
         scolors = get_sixel_colors(term)
         if scolors and scolors < 256:
             if not set_sixel_colors(term, 256):
                 term.write('Cannot use 256 sixel colors, aborting.\n')
                 return
-        sgeo = get_sixel_geometry(term)
-        if not sgeo:
-            sgeo = term_size[2:]
+
+        # retrieve fg/bg color
         fg_color = term.query_color('fg') or DEFAULT_FG
         bg_color = term.query_color('bg') or DEFAULT_BG
 
         # adjust image size to terminal width and height minus one row
-        x, y = sgeo
         rows = term_size[1]
         tile_size = (level, level)
         size = (
-            floor(float(x) / tile_size[0]) * tile_size[0],
-            floor(float(y - (y/rows)) / tile_size[1]) * tile_size[1],
+            int(float(x) / tile_size[0]) * tile_size[0],
+            int(float(y - (y/rows)) / tile_size[1]) * tile_size[1],
         )
 
         # prepare image and game state

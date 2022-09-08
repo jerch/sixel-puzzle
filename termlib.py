@@ -78,12 +78,11 @@ class TerminalContext:
             can_read, _, _ = select([self.fd], [], [], timeout)
             return os.read(self.fd, 1024) if can_read else b''
 
-    def get_size(self) -> Tuple[int, int, int, int]:
+    def get_size_ioctl(self) -> Tuple[int, int, int, int]:
         """
-        Return terminal size as (cols, rows, xpixel, ypixel).
+        Return terminal size as (cols, rows, xpixel, ypixel),
+        queried from ioctl TIOCGWINSZ.
         Reports 0 for values that cannot be retrieved.
-        The method first tries ioctl with TIOCGWINSZ and fills
-        missing values from CSI 14 t and CSI 18 t query attempts.
         """
         cols, rows, xpixel, ypixel = [0, 0, 0, 0]
         try:
@@ -91,22 +90,31 @@ class TerminalContext:
             rows, cols, xpixel, ypixel = unpack('HHHH', packed)
         except:
             pass
-        if not rows or not cols:
-            report = self.query('\x1b[18t')
-            if report.startswith(b'\x1b[8;') and report.endswith(b't'):
-                try:
-                    rows, cols = [int(v) for v in report[4:-1].split(b';')]
-                except:
-                    pass
-        if not xpixel or not ypixel:
-            report = self.query('\x1b[14t')
-            if report.startswith(b'\x1b[4;') and report.endswith(b't'):
-                try:
-                    ypixel, xpixel = [int(v) for v in report[4:-1].split(b';')]
-                except:
-                    pass
         return cols, rows, xpixel, ypixel
-    
+
+    def get_size_winops(self) -> Tuple[int, int, int, int]:
+        """
+        Return terminal size as (cols, rows, xpixel, ypixel),
+        queried from terminal via WinOps sequence (CSI 14 t and CSI 18 t).
+        Reports 0 for values that cannot be retrieved.
+        """
+        cols, rows, xpixel, ypixel = [0, 0, 0, 0]
+        # query size in cells
+        report = self.query('\x1b[18t')
+        if report.startswith(b'\x1b[8;') and report.endswith(b't'):
+            try:
+                rows, cols = [int(v) for v in report[4:-1].split(b';')]
+            except:
+                pass
+        # query size in pixels
+        report = self.query('\x1b[14t')
+        if report.startswith(b'\x1b[4;') and report.endswith(b't'):
+            try:
+                ypixel, xpixel = [int(v) for v in report[4:-1].split(b';')]
+            except:
+                pass
+        return cols, rows, xpixel, ypixel
+
     def write(self, s: Union[str, bytes]) -> None:
         """
         Write string or bytes directly to the terminal.
